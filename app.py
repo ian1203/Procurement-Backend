@@ -1,25 +1,27 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import httpx
 import os
 from datetime import datetime, timedelta
 
-NEWS_API_KEY = os.environ.get("NEWSAPI_KEY")
-
 app = FastAPI()
 
 class NewsQuery(BaseModel):
     query: str
-    region: str | None = None        # e.g. "Montreal", "Quebec", "Canada"
-    materials: list[str] | None = None  # e.g. ["concrete", "rebar"]
-    days_back: int = 5               # how far back to search
+    region: str | None = None
+    materials: list[str] | None = None
+    days_back: int = 5
+
+def get_news_api_key() -> str:
+    key = os.getenv("NEWSAPI_KEY")
+    if not key:
+        raise HTTPException(status_code=500, detail="NEWSAPI_KEY not configured")
+    return key
 
 @app.post("/news/search")
 async def news_search(q: NewsQuery):
-    if not NEWS_API_KEY:
-        return {"error": "NEWSAPI_KEY not configured"}
+    NEWS_API_KEY = get_news_api_key()   # <-- read per request
 
-    # Build a smart query string
     terms = [q.query]
     if q.materials:
         terms.extend(q.materials)
@@ -43,7 +45,6 @@ async def news_search(q: NewsQuery):
         resp.raise_for_status()
         data = resp.json()
 
-    # Normalize to what Orchestrate expects as "documents"
     docs = []
     for art in data.get("articles", []):
         docs.append({
