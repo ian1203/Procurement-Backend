@@ -1,0 +1,97 @@
+openapi: 3.0.3
+info:
+  title: Procurement Contract Monitor API
+  version: "1.0.0"
+paths:
+  /contract_status:
+    post:
+      summary: Get status/exceptions
+      tags: [monitoring]
+      parameters:
+        - in: header
+          name: X-API-Key
+          schema: { type: string }
+          required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_input:
+                  type: string
+                  description: Free-text filter (PO, SKU, keyword).
+              required: [user_input]
+      responses:
+        "200":
+          description: Contract status snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  markdown: { type: string }
+                  kpis:
+                    type: object
+                    properties:
+                      as_of: { type: string }
+                      on_time_pct: { type: integer }
+                      delayed: { type: integer }
+                      qc_failed: { type: integer }
+                      spec_mismatch: { type: integer }
+                    required: [as_of, on_time_pct, delayed, qc_failed, spec_mismatch]
+                  exceptions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        contract_id: { type: string }
+                        sku: { type: string }
+                        issue: { type: string }
+                        due: { type: string }
+                        eta: { type: [string, "null"] }
+                        impact: { type: string }
+                      required: [contract_id, sku, issue, due, eta, impact]
+                required: [markdown]
+  /risk_scan:
+    post:
+      summary: Scan external risks
+      tags: [risk]
+      parameters:
+        - in: header
+          name: X-API-Key
+          schema: { type: string }
+          required: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                  description: Optional filter (SKU, supplier, keyword).
+      responses:
+        "200":
+          description: Risk alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  markdown: { type: string }
+                  alerts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        time: { type: string }
+                        event: { type: string }
+                        affects: { type: string }
+                        likelihood: { type: string }
+                        impact: { type: string }
+                        recommendation: { type: string }
+                      required: [time, event, affects, likelihood, impact, recommendation]
+                required: [markdown]
