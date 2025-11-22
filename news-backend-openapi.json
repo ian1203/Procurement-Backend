@@ -3,7 +3,7 @@
   "info": {
     "title": "Procurement News Backend",
     "version": "0.1.0",
-    "description": "Backend service that calls NewsAPI.org and returns normalized news documents for supply-chain risk monitoring. Note: NewsAPI free tier only supports up to 30 days of history; days_back is clamped to 30."
+    "description": "Backend service that calls NewsAPI.ai (Event Registry) and returns normalized news documents for supply-chain risk monitoring."
   },
   "servers": [
     {
@@ -40,13 +40,11 @@
                     },
                     "effective_days_back": {
                       "type": "integer",
-                      "description": "Actual number of days back used (clamped to 30).",
                       "example": 30
                     },
                     "total_results_raw": {
                       "type": "integer",
-                      "description": "Total results value returned by NewsAPI before local filtering.",
-                      "example": 128
+                      "example": 42
                     },
                     "documents": {
                       "type": "array",
@@ -72,28 +70,8 @@
               }
             }
           },
-          "400": {
-            "description": "Bad Request (e.g., empty query)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Server Error (e.g., missing NEWSAPI_KEY or upstream error)",
             "content": {
               "application/json": {
                 "schema": {
@@ -116,17 +94,17 @@
           "query": {
             "type": "string",
             "title": "Query",
-            "description": "Main risk phrase, e.g. 'concrete shortage OR supply disruption'."
+            "description": "Main risk phrase, e.g. 'concrete disruption'"
           },
           "region": {
             "title": "Region",
-            "description": "Region keywords, optionally using 'OR', e.g. 'US OR Canada OR Europe'.",
+            "description": "City / region / country to focus on, e.g. 'Montreal'",
             "type": "string",
             "nullable": true
           },
           "materials": {
             "title": "Materials",
-            "description": "List of material keywords, e.g. ['concrete','cement','steel'].",
+            "description": "List of material keywords, e.g. ['concrete','cement']",
             "type": "array",
             "items": {
               "type": "string"
@@ -135,7 +113,7 @@
           },
           "days_back": {
             "title": "Days Back",
-            "description": "How many days back to search from today (will be clamped to a maximum of 30).",
+            "description": "How many days back to search from today (capped to 30 in backend)",
             "type": "integer",
             "default": 5
           }
