@@ -1,0 +1,154 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "Procurement News Backend",
+    "version": "0.1.0",
+    "description": "Backend service that calls NewsAPI.org and returns normalized news documents for supply-chain risk monitoring."
+  },
+  "servers": [
+    {
+      "url": "https://procurement-backend-2q98.onrender.com",
+      "description": "Render deployment"
+    }
+  ],
+  "paths": {
+    "/news/search": {
+      "post": {
+        "summary": "News Search",
+        "operationId": "news_search_news_search_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewsQuery"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "documents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string" },
+                          "title": { "type": "string" },
+                          "content": { "type": "string" },
+                          "url": { "type": "string" },
+                          "source": { "type": "string" },
+                          "publishedAt": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "material_risk_hint": { "type": "string" }
+                        }
+                      }
+                    }
+                  },
+                  "required": ["status", "documents"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "NewsQuery": {
+        "title": "NewsQuery",
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "Main risk phrase, e.g. 'concrete disruption'"
+          },
+          "region": {
+            "title": "Region",
+            "description": "City / region / country to focus on, e.g. 'Montreal'",
+            "type": "string",
+            "nullable": true
+          },
+          "materials": {
+            "title": "Materials",
+            "description": "List of material keywords, e.g. ['concrete','cement']",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "days_back": {
+            "title": "Days Back",
+            "description": "How many days back to search from today",
+            "type": "integer",
+            "default": 5
+          }
+        }
+      },
+      "HTTPValidationError": {
+        "title": "HTTPValidationError",
+        "type": "object",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            }
+          }
+        }
+      },
+      "ValidationError": {
+        "title": "ValidationError",
+        "type": "object",
+        "required": ["loc", "msg", "type"],
+        "properties": {
+          "loc": {
+            "title": "Location",
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "integer" }
+              ]
+            }
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
