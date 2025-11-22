@@ -2,8 +2,8 @@
   "openapi": "3.0.1",
   "info": {
     "title": "Procurement News Backend",
-    "version": "0.1.0",
-    "description": "Backend service that calls NewsAPI.org and returns normalized news documents for supply-chain risk monitoring."
+    "version": "0.2.0",
+    "description": "Backend service that calls NewsAPI.org and returns normalized, relevance-scored news documents for supply-chain risk monitoring."
   },
   "servers": [
     {
@@ -38,8 +38,19 @@
                       "type": "string",
                       "example": "ok"
                     },
+                    "effective_days_back": {
+                      "type": "integer",
+                      "description": "Actual number of days used in the query (clamped to NewsAPI’s 30-day limit).",
+                      "example": 30
+                    },
+                    "total_results_raw": {
+                      "type": "integer",
+                      "description": "NewsAPI's totalResults value before relevance filtering.",
+                      "example": 128
+                    },
                     "documents": {
                       "type": "array",
+                      "description": "Normalized news articles with relevance scores.",
                       "items": {
                         "type": "object",
                         "properties": {
@@ -52,12 +63,40 @@
                             "type": "string",
                             "format": "date-time"
                           },
-                          "material_risk_hint": { "type": "string" }
-                        }
+                          "material_risk_hint": {
+                            "type": "string",
+                            "description": "The final NewsAPI query string used for this search."
+                          },
+                          "relevance_score": {
+                            "type": "integer",
+                            "description": "Heuristic relevance score; higher means more likely to be a true supply-chain risk article.",
+                            "example": 6
+                          },
+                          "high_relevance": {
+                            "type": "boolean",
+                            "description": "True if the article passes the current high-relevance threshold on the backend.",
+                            "example": true
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "title",
+                          "url",
+                          "source",
+                          "publishedAt",
+                          "material_risk_hint",
+                          "relevance_score",
+                          "high_relevance"
+                        ]
                       }
                     }
                   },
-                  "required": ["status", "documents"]
+                  "required": [
+                    "status",
+                    "effective_days_back",
+                    "total_results_raw",
+                    "documents"
+                  ]
                 }
               }
             }
@@ -86,17 +125,17 @@
           "query": {
             "type": "string",
             "title": "Query",
-            "description": "Main risk phrase, e.g. 'concrete disruption'"
+            "description": "Main risk phrase, e.g. 'concrete disruption' or 'oil price'."
           },
           "region": {
             "title": "Region",
-            "description": "City / region / country to focus on, e.g. 'Montreal'",
+            "description": "City / region / country to focus on, e.g. 'Montreal' or 'North America'.",
             "type": "string",
             "nullable": true
           },
           "materials": {
             "title": "Materials",
-            "description": "List of material keywords, e.g. ['concrete','cement']",
+            "description": "List of material keywords, e.g. ['concrete','cement','steel'].",
             "type": "array",
             "items": {
               "type": "string"
@@ -105,7 +144,7 @@
           },
           "days_back": {
             "title": "Days Back",
-            "description": "How many days back to search from today",
+            "description": "How many days back to search from today (will be clamped to 30 on the backend).",
             "type": "integer",
             "default": 5
           }
