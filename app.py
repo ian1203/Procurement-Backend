@@ -2,6 +2,7 @@ import os
 from datetime import date, timedelta
 from typing import List, Optional
 
+import re
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -97,13 +98,31 @@ async def news_search(payload: NewsQuery):
     today = date.today()
     date_start = today - timedelta(days=effective_days_back)
 
-    # Treat query as a single keyword string (it can contain boolean logic itself)
-    keyword_value: str = payload.query
+    # --------------------------------------------------
+    # Build keyword(s) for NewsAPI.ai
+    # --------------------------------------------------
+    raw_q = (payload.query or "").strip()
+
+    keywords: list[str] | str
+    keyword_oper = "or"
+
+    # If user typed something like "A OR B OR C",
+    # split on OR and send a keyword list
+    or_split = re.split(r"\bOR\b", raw_q, flags=re.IGNORECASE)
+    parts = [p.strip() for p in or_split if p.strip()]
+
+    if len(parts) > 1:
+        # Multiple tokens -> use list + OR
+        keywords = parts
+        keyword_oper = "or"
+    else:
+        # Single phrase -> send as-is
+        keywords = raw_q
 
     body = {
         "apiKey": NEWSAPI_KEY,
-        "keyword": keyword_value,        # single string, e.g. "oil OR energy"
-        "keywordOper": "or",            # ignored for single keyword, but ok
+        "keyword": keywords,          # string or list
+        "keywordOper": keyword_oper,  # ignored for single string, fine for list
         "lang": ["eng"],
         "dateStart": date_start.strftime("%Y-%m-%d"),
         "dateEnd": today.strftime("%Y-%m-%d"),
@@ -115,7 +134,7 @@ async def news_search(payload: NewsQuery):
     if payload.region:
         body["sourceLocationUri"] = region_to_location_uri(payload.region)
 
-    # --------- 1) Call NewsAPI.ai ----------
+    # Call NewsAPI.ai
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(
@@ -143,7 +162,9 @@ async def news_search(payload: NewsQuery):
             detail=f"NewsAPI.ai error: {data['error']}",
         )
 
-    # --------- 2) DEBUG BLOCK (now resp & data exist) ----------
+    # ======================================================
+    # 🔍 DEBUG BLOCK — Print exactly what we sent and got
+    # ======================================================
     print("=== NewsAPI.ai DEBUG ===", flush=True)
     print("Request body:", body, flush=True)
     print("HTTP status:", resp.status_code, flush=True)
@@ -156,9 +177,12 @@ async def news_search(payload: NewsQuery):
         a.get("title") for a in articles_block.get("results", [])[:5]
     ]
     print("First article titles:", results_preview, flush=True)
+
     print("totalResults:", articles_block.get("totalResults"), flush=True)
     print("======================================================", flush=True)
-    # -----------------------------------------------------------
+    # ======================================================
+
+    # ... then keep your existing parsing/return code as-is ...
 
     # 3) Parse article block
     articles = articles_block.get("results", []) or []
