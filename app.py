@@ -114,6 +114,42 @@ class ClassificationRequest(BaseModel):
     region: Optional[str] = None
     documents: List[ArticleForClassification]
 
+class RiskRequest(BaseModel):
+    """
+    High-level request for pre-filtered, LLM-classified external risks.
+
+    The backend will:
+    - build a reasonable query from the materials if query is not provided
+    - call /news/search with risk_filter=false
+    - call /news/classify on the returned documents
+    - return only risk events
+    """
+    materials: Optional[List[str]] = Field(
+        None,
+        description="Materials of interest. If omitted, defaults to cement/concrete/rebar/steel/aggregates.",
+    )
+    region: Optional[str] = Field(
+        None,
+        description="Region of interest (country / area), e.g. 'United States', 'Mexico', 'EU'.",
+    )
+    days_back: int = Field(
+        7,
+        ge=1,
+        le=365,
+        description="How many days back to search from today (capped to 30 in backend).",
+    )
+    max_docs: int = Field(
+        10,
+        ge=1,
+        le=50,
+        description="Max candidate docs fetched from NewsAPI before classification.",
+    )
+    query: Optional[str] = Field(
+        None,
+        description="Optional override for raw keyword query. "
+                    "If omitted, backend builds 'material1 OR material2 ...'.",
+    )
+
 
 class ClassifiedArticle(BaseModel):
     id: Optional[str]
@@ -542,4 +578,83 @@ async def news_classify(payload: ClassificationRequest):
         "risk_docs": len(risks_only),
         "classified": [c.dict() for c in classified_results],
         "risks_only": [c.dict() for c in risks_only],
+    }
+
+@app.post("/news/risk")
+async def news_risk(payload: RiskRequest):
+    """
+    High-level endpoint:
+    - builds a broad news query for the given materials/region
+    - fetches candidate articles from NewsAPI.ai
+    - runs LLM classification
+    - returns only external risk events
+
+    This is the endpoint your agent should usually call.
+    """
+
+    # 1) Decide query string
+    # If user provided a query, use it; otherwise build "mat1 OR mat2 ..."
+    materials = normalize_materials(payload.materials)
+    if payload.query:
+        query_str = payload.query
+    else:
+        # Simple OR query over materials, e.g. "cement OR concrete OR rebar ..."
+        query_str = " OR ".join(materials)
+
+    # 2) Call the internal /news/search logic with risk_filter disabled
+    news_query = NewsQuery(
+        query=query_str,
+        region=payload.region,
+        materials=materials,
+        days_back=payload.days_back,
+        risk_filter=False,          # keep broad recall; LLM will filter
+        max_docs=payload.max_docs,
+        min_risk_score=None,
+    )
+
+    search_result = await news_search(news_query)
+
+    candidate_docs = search_result.get("documents", []) or []
+
+    # If no candidates, short-circuit
+    if not candidate_docs:
+        return {
+            "status": "ok",
+            "effective_days_back": search_result.get("effective_days_back"),
+            "total_results_raw": search_result.get("total_results_raw"),
+            "candidate_docs": 0,
+            "risk_docs": 0,
+            "risks": [],
+        }
+
+    # 3) Build ClassificationRequest from search docs
+    classification_docs: List[ArticleForClassification] = []
+    for d in candidate_docs:
+        classification_docs.append(
+            ArticleForClassification(
+                id=d.get("id"),
+                title=d.get("title") or "",
+                content=d.get("content") or "",
+                url=d.get("url"),
+                source=d.get("source"),
+                publishedAt=d.get("publishedAt"),
+                material_risk_hint=d.get("material_risk_hint"),
+            )
+        )
+
+    classification_request = ClassificationRequest(
+        materials=materials,
+        region=payload.region,
+        documents=classification_docs,
+    )
+
+    classification_result = await news_classify(classification_request)
+
+    return {
+        "status": "ok",
+        "effective_days_back": search_result.get("effective_days_back"),
+        "total_results_raw": search_result.get("total_results_raw"),
+        "candidate_docs": search_result.get("returned_docs"),
+        "risk_docs": classification_result.get("risk_docs"),
+        "risks": classification_result.get("risks_only"),
     }
