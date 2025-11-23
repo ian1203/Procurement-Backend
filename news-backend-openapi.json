@@ -44,7 +44,13 @@
                     },
                     "total_results_raw": {
                       "type": "integer",
-                      "example": 42
+                      "example": 7042,
+                      "description": "Total raw results reported by NewsAPI.ai for this query."
+                    },
+                    "returned_docs": {
+                      "type": "integer",
+                      "example": 25,
+                      "description": "Number of documents actually returned after filtering and ranking."
                     },
                     "documents": {
                       "type": "array",
@@ -54,14 +60,27 @@
                           "id": { "type": "string" },
                           "title": { "type": "string" },
                           "content": { "type": "string" },
-                          "url": { "type": "string" },
+                          "url": { "type": "string", "format": "uri" },
                           "source": { "type": "string" },
                           "publishedAt": {
                             "type": "string",
                             "format": "date-time"
                           },
-                          "material_risk_hint": { "type": "string" }
-                        }
+                          "material_risk_hint": { "type": "string" },
+                          "material_hits": {
+                            "type": "integer",
+                            "description": "Heuristic count of material-related term matches in title+content."
+                          },
+                          "risk_keyword_hits": {
+                            "type": "integer",
+                            "description": "Heuristic count of risk-related keyword matches in title+content."
+                          },
+                          "risk_score": {
+                            "type": "integer",
+                            "description": "Combined heuristic risk score used for ranking."
+                          }
+                        },
+                        "required": ["id", "title", "url"]
                       }
                     }
                   },
@@ -116,6 +135,18 @@
             "description": "How many days back to search from today (capped to 30 in backend)",
             "type": "integer",
             "default": 5
+          },
+          "risk_filter": {
+            "title": "Risk Filter",
+            "description": "If true, only return articles that look like material-related risks (material term + risk keyword).",
+            "type": "boolean",
+            "default": true
+          },
+          "max_docs": {
+            "title": "Max Docs",
+            "description": "Maximum number of articles to return after filtering & ranking.",
+            "type": "integer",
+            "default": 200
           }
         }
       },

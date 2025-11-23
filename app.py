@@ -267,7 +267,7 @@ async def news_search(payload: NewsQuery):
     documents: List[dict] = []
     risk_hint = build_material_risk_hint(payload, effective_days_back)
 
-    # NEW: pre-compute material terms for scoring
+    # pre-compute material terms for scoring
     material_terms = _flatten_material_terms(payload.materials)
 
     for a in articles:
@@ -314,5 +314,6 @@ async def news_search(payload: NewsQuery):
         "status": "ok",
         "effective_days_back": effective_days_back,
         "total_results_raw": int(total_raw),
+        "returned_docs": len(documents),
         "documents": documents,
     }
