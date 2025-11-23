@@ -10,10 +10,10 @@ from pydantic import BaseModel, Field
 # Config
 # ---------------------------
 
-NEWSAPI_AI_KEY = os.environ.get("NEWSAPI_AI_KEY")
+NEWSAPI_AI_KEY = os.environ.get("NEWSAPI_KEY")
 if not NEWSAPI_AI_KEY:
     # Fail fast if the key is missing so Render logs clearly show it
-    raise RuntimeError("Please set the NEWSAPI_AI_KEY environment variable")
+    raise RuntimeError("Please set the NEWSAPI_KEY environment variable")
 
 NEWSAPI_AI_ENDPOINT = "https://eventregistry.org/api/v1/article/getArticles"
 # You can also use "https://newsapi.ai/api/v1/article/getArticles" –
