@@ -1,6 +1,6 @@
 import os
 from datetime import date, timedelta
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import re
 import httpx
@@ -44,6 +44,17 @@ class NewsQuery(BaseModel):
         le=365,
         description="How many days back to search from today (capped to 30 for free NewsAPI.ai accounts)",
     )
+    # Intelligence layer knobs
+    risk_filter: bool = Field(
+        True,
+        description="If true, only return articles that look like material-related risks."
+    )
+    max_docs: int = Field(
+        200,
+        ge=1,
+        le=1000,
+        description="Maximum number of articles to return after filtering & ranking."
+    )
 
 
 app = FastAPI(
@@ -60,7 +71,7 @@ app = FastAPI(
 def build_material_risk_hint(q: NewsQuery, effective_days_back: int) -> str:
     """
     Short human-readable description of the filter that produced this result.
-    This is just for debugging / transparency for the WatsonX agent.
+    This is just for debugging / transparency for the WatsonX/OpenAI agent.
     """
     parts: List[str] = []
     if q.query:
@@ -80,6 +91,73 @@ def region_to_location_uri(region: str) -> str:
     """
     slug = region.strip().replace(" ", "_")
     return f"http://en.wikipedia.org/wiki/{slug}"
+
+
+# ---------------------------
+# Simple risk + material heuristics
+# ---------------------------
+
+RISK_KEYWORDS: List[str] = [
+    "shortage", "shortages",
+    "strike", "walkout", "protest",
+    "disruption", "disruptions", "bottleneck",
+    "delay", "delays",
+    "shutdown", "shut down", "closure", "closed",
+    "outage",
+    "congestion", "port congestion",
+    "backlog", "backlogs",
+    "price spike", "price spikes", "price surge", "price surges",
+    "price increase", "price increases", "price hike", "price hikes",
+    "tariff", "tariffs",
+    "sanction", "sanctions",
+    "export ban", "export bans", "embargo",
+    "restriction", "restrictions", "quota", "quotas",
+    "regulation", "regulations", "new law", "new laws",
+    "environmental rule", "environmental rules",
+]
+
+MATERIAL_SYNONYMS = {
+    "cement": ["cement", "clinker", "ready-mix", "ready mix"],
+    "concrete": ["concrete", "ready-mix", "ready mix"],
+    "rebar": ["rebar", "reinforcing steel", "steel rebar"],
+    "steel": ["steel", "steel mill", "steelmaker", "steel producer"],
+    "aggregates": ["aggregates", "gravel", "crushed stone", "sand", "construction aggregates"],
+    "asphalt": ["asphalt", "bitumen"],
+}
+
+
+def _flatten_material_terms(materials: Optional[List[str]]) -> List[str]:
+    """
+    From payload.materials build a list of concrete terms we care about.
+    If nothing provided, fall back to a global construction-material list.
+    """
+    if not materials:
+        materials = ["cement", "concrete", "rebar", "steel", "aggregates", "asphalt"]
+
+    terms: List[str] = []
+    for m in materials:
+        m_lower = m.lower()
+        if m_lower in MATERIAL_SYNONYMS:
+            terms.extend(MATERIAL_SYNONYMS[m_lower])
+        else:
+            terms.append(m_lower)
+    # dedupe & normalize to lowercase
+    return sorted({t.lower() for t in terms})
+
+
+def score_article_for_risk(text: str, material_terms: List[str]) -> Tuple[int, int, int]:
+    """
+    Return (material_hits, risk_hits, total_score) for a given piece of text.
+    Very simple: count substring matches.
+    """
+    t = text.lower()
+
+    mat_hits = sum(1 for m in material_terms if m in t)
+    risk_hits = sum(1 for k in RISK_KEYWORDS if k in t)
+
+    # Simple combined score; we can tune weights later.
+    total_score = mat_hits * 2 + risk_hits  # materials slightly higher weight
+    return mat_hits, risk_hits, total_score
 
 
 # ---------------------------
@@ -182,24 +260,37 @@ async def news_search(payload: NewsQuery):
     print("======================================================", flush=True)
     # ======================================================
 
-    # ... then keep your existing parsing/return code as-is ...
-
     # 3) Parse article block
     articles = articles_block.get("results", []) or []
     total_raw = articles_block.get("totalResults", len(articles))
 
-    documents = []
+    documents: List[dict] = []
     risk_hint = build_material_risk_hint(payload, effective_days_back)
+
+    # NEW: pre-compute material terms for scoring
+    material_terms = _flatten_material_terms(payload.materials)
 
     for a in articles:
         source = a.get("source", {})
         source_title = source.get("title") if isinstance(source, dict) else source
 
+        title = a.get("title") or ""
+        body_text = a.get("body") or ""
+        full_text = f"{title}\n{body_text}"
+
+        # Heuristic risk scoring
+        mat_hits, risk_hits, score = score_article_for_risk(full_text, material_terms)
+
+        # If risk_filter is ON:
+        #   - Require at least one material hit AND one risk hit.
+        if payload.risk_filter and (mat_hits == 0 or risk_hits == 0):
+            continue
+
         documents.append(
             {
                 "id": a.get("uri") or a.get("url"),
-                "title": a.get("title"),
-                "content": a.get("body"),
+                "title": title,
+                "content": body_text,
                 "url": a.get("url"),
                 "source": source_title,
                 "publishedAt": (
@@ -208,8 +299,16 @@ async def news_search(payload: NewsQuery):
                     or a.get("date")
                 ),
                 "material_risk_hint": risk_hint,
+                # Expose heuristics to the agent / future LLM layer
+                "material_hits": mat_hits,
+                "risk_keyword_hits": risk_hits,
+                "risk_score": score,
             }
         )
+
+    # Rank by risk_score and cap the number of docs returned
+    documents.sort(key=lambda d: d["risk_score"], reverse=True)
+    documents = documents[: payload.max_docs]
 
     return {
         "status": "ok",
