@@ -10,8 +10,8 @@ from pydantic import BaseModel, Field
 # Config
 # ---------------------------
 
-NEWSAPI_AI_KEY = os.environ.get("NEWSAPI_KEY")
-if not NEWSAPI_AI_KEY:
+NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
+if not NEWSAPI_KEY:
     # Fail fast if the key is missing so Render logs clearly show it
     raise RuntimeError("Please set the NEWSAPI_KEY environment variable")
 
@@ -109,22 +109,17 @@ async def news_search(payload: NewsQuery):
 
     # Build request body for NewsAPI.ai / Event Registry
     body = {
-        # authentication
-        "apiKey": NEWSAPI_AI_KEY,
-        # filters
+        "apiKey": NEWSAPI_KEY,
         "keyword": keywords if len(keywords) > 1 else keywords[0],
         "keywordOper": keyword_oper,
         "lang": ["eng"],
         "dateStart": date_start.strftime("%Y-%m-%d"),
         "dateEnd": today.strftime("%Y-%m-%d"),
-        # result options
         "resultType": "articles",
-        "articlesSortBy": "date",     # newest first
-        "articlesCount": 50,          # up to 100 allowed per call
-        # we *don’t* request heavy extra fields (concepts, categories) for now
+        "articlesSortBy": "date",
+        "articlesCount": 50,
     }
 
-    # Optional region filter: use sourceLocationUri when user provides region
     if payload.region:
         body["sourceLocationUri"] = region_to_location_uri(payload.region)
 
@@ -151,26 +146,42 @@ async def news_search(payload: NewsQuery):
     data = resp.json()
 
     if "error" in data:
-        # Event Registry style error
         raise HTTPException(
             status_code=502,
             detail=f"NewsAPI.ai error: {data['error']}",
         )
 
+    # ======================================================
+    # 🔍 DEBUG BLOCK — Print exactly what we sent and got
+    # These prints appear in Render → Logs
+    # ======================================================
+    print("=== NewsAPI.ai DEBUG ===", flush=True)
+    print("Request body:", body, flush=True)
+    print("HTTP status:", resp.status_code, flush=True)
+    print("Raw top-level keys:", list(data.keys()), flush=True)
+
     articles_block = data.get("articles", {})
+    print("articles_block:", type(articles_block), articles_block, flush=True)
+
+    results_preview = [
+        a.get("title") for a in articles_block.get("results", [])[:5]
+    ]
+    print("First article titles:", results_preview, flush=True)
+
+    print("totalResults:", articles_block.get("totalResults"), flush=True)
+    print("======================================================", flush=True)
+    # ======================================================
+
+    # Parse article block
     articles = articles_block.get("results", []) or []
     total_raw = articles_block.get("totalResults", len(articles))
 
-    # Normalize into the format your WatsonX tool expects
     documents = []
     risk_hint = build_material_risk_hint(payload, effective_days_back)
 
     for a in articles:
         source = a.get("source", {})
-        if isinstance(source, dict):
-            source_title = source.get("title")
-        else:
-            source_title = source
+        source_title = source.get("title") if isinstance(source, dict) else source
 
         documents.append(
             {
