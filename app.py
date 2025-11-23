@@ -2,67 +2,33 @@ import os
 import re
 import json
 from datetime import date, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from openai import OpenAI
 
 # ---------------------------
 # Config
 # ---------------------------
 
-# News API
 NEWSAPI_KEY = os.environ.get("NEWSAPI_KEY")
 if not NEWSAPI_KEY:
     raise RuntimeError("Please set the NEWSAPI_KEY environment variable")
 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("Please set the OPENAI_API_KEY environment variable")
+
+client = OpenAI(api_key=OPENAI_API_KEY)
+
 NEWSAPI_AI_ENDPOINT = "https://eventregistry.org/api/v1/article/getArticles"
 
-# LLM (for classification). Optional: only required for /news/classify
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
-
-# Domain vocab
-DEFAULT_MATERIALS = ["cement", "concrete", "rebar", "steel", "aggregate", "aggregates"]
-
-RISK_KEYWORDS = [
-    "shortage", "shortages", "scarcity", "scarce",
-    "disruption", "disruptions", "disrupted",
-    "delay", "delays", "delayed",
-    "bottleneck", "bottlenecks",
-    "backlog", "backlogs",
-    "strike", "strikes", "walkout", "walkouts",
-    "lockout", "lockouts",
-    "shutdown", "shut down", "closure", "closures",
-    "suspension", "suspended",
-    "port", "ports", "terminal", "terminals",
-    "congestion", "backed up",
-    "shipping", "shipment", "shipments", "freight",
-    "supply chain", "logistics",
-    "sanction", "sanctions", "embargo", "export ban", "export bans",
-    "tariff", "tariffs", "export controls",
-    "price spike", "price spikes", "price surge", "price surges",
-    "price increase", "price increases",
-    "cost increase", "cost pressure",
-]
-
-CONSTRUCTION_KEYWORDS = [
-    "construction", "infrastructure",
-    "bridge", "bridges",
-    "highway", "highways", "road", "roads",
-    "tunnel", "tunnels", "dam", "dams",
-    "cement plant", "cement factory", "cement works",
-    "steel mill", "steel plant",
-    "quarry", "quarries", "ready-mix", "ready mix",
-    "batch plant", "asphalt plant", "concrete plant",
-]
-
-
 # ---------------------------
-# Pydantic models
+# Models
 # ---------------------------
+
 
 class NewsQuery(BaseModel):
     query: str = Field(
@@ -85,24 +51,24 @@ class NewsQuery(BaseModel):
     )
     risk_filter: bool = Field(
         True,
-        description="If true, apply a simple heuristic risk filter on the raw articles.",
+        description="If true, only return articles that look like material-related risks.",
     )
     max_docs: int = Field(
         20,
         ge=1,
-        le=100,
-        description="Maximum number of documents to return after filtering & ranking.",
+        le=200,
+        description="Maximum number of articles to return after filtering & ranking.",
     )
     min_risk_score: Optional[int] = Field(
         None,
-        description="Optional minimum heuristic risk_score; if omitted a default is used.",
+        description="Optional minimum heuristic risk_score threshold when risk_filter=true.",
     )
 
 
 class ArticleForClassification(BaseModel):
     id: Optional[str] = None
     title: str
-    content: Optional[str] = ""
+    content: Optional[str] = None
     url: Optional[str] = None
     source: Optional[str] = None
     publishedAt: Optional[str] = None
@@ -114,72 +80,30 @@ class ClassificationRequest(BaseModel):
     region: Optional[str] = None
     documents: List[ArticleForClassification]
 
+
 class RiskRequest(BaseModel):
-    """
-    High-level request for pre-filtered, LLM-classified external risks.
-
-    The backend will:
-    - build a reasonable query from the materials if query is not provided
-    - call /news/search with risk_filter=false
-    - call /news/classify on the returned documents
-    - return only risk events
-    """
-    materials: Optional[List[str]] = Field(
-        None,
-        description="Materials of interest. If omitted, defaults to cement/concrete/rebar/steel/aggregates.",
-    )
-    region: Optional[str] = Field(
-        None,
-        description="Region of interest (country / area), e.g. 'United States', 'Mexico', 'EU'.",
-    )
-    days_back: int = Field(
-        7,
-        ge=1,
-        le=365,
-        description="How many days back to search from today (capped to 30 in backend).",
-    )
-    max_docs: int = Field(
-        10,
-        ge=1,
-        le=50,
-        description="Max candidate docs fetched from NewsAPI before classification.",
-    )
-    query: Optional[str] = Field(
-        None,
-        description="Optional override for raw keyword query. "
-                    "If omitted, backend builds 'material1 OR material2 ...'.",
-    )
-
-
-class ClassifiedArticle(BaseModel):
-    id: Optional[str]
-    title: str
-    url: Optional[str]
-    source: Optional[str]
-    publishedAt: Optional[str]
-    material_risk_hint: Optional[str]
-    is_risk: bool
-    risk_level: int
-    affected_materials: List[str]
-    affected_regions: List[str]
-    time_horizon_days: Optional[int]
-    reason: str
+    materials: Optional[Any] = None  # can be list or string; we normalize
+    region: Optional[Any] = None
+    days_back: int = 7
+    max_docs: int = 10
+    query: Optional[str] = None
 
 
 # ---------------------------
-# FastAPI app
+# App
 # ---------------------------
 
 app = FastAPI(
     title="Procurement News Backend",
     version="0.2.0",
-    description="Backend service that calls NewsAPI.ai for news ingestion and an LLM for risk classification.",
+    description="Backend service that calls NewsAPI.ai for news ingestion and an LLM for supply-chain risk classification.",
 )
 
 
 # ---------------------------
-# Helper functions
+# Helpers
 # ---------------------------
+
 
 def build_material_risk_hint(q: NewsQuery, effective_days_back: int) -> str:
     parts: List[str] = []
@@ -198,191 +122,163 @@ def region_to_location_uri(region: str) -> str:
     return f"http://en.wikipedia.org/wiki/{slug}"
 
 
-def normalize_materials(user_materials: Optional[List[str]]) -> List[str]:
-    if user_materials:
-        base = [m.strip().lower() for m in user_materials if m.strip()]
-    else:
-        base = []
-    base.extend(DEFAULT_MATERIALS)
-    seen = set()
-    result: List[str] = []
-    for m in base:
-        if m and m not in seen:
-            seen.add(m)
-            result.append(m)
-    return result
+def normalize_materials(raw) -> List[str]:
+    """
+    Normalize the 'materials' field into a clean list of lowercase material names.
+    Handles:
+    - None  -> default broad list
+    - list[str] -> cleaned
+    - string like '["steel", "cement"]' -> parsed as JSON
+    - string like 'steel, cement' -> split on commas
+    """
+    default_materials = ["cement", "concrete", "rebar", "steel", "aggregates", "copper", "lumber"]
+
+    if raw is None:
+        return default_materials
+
+    if isinstance(raw, list):
+        cleaned = [str(m).strip().lower() for m in raw if str(m).strip()]
+        return cleaned or default_materials
+
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return default_materials
+
+        # Try JSON list first
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                cleaned = [str(m).strip().lower() for m in parsed if str(m).strip()]
+                if cleaned:
+                    return cleaned
+        except Exception:
+            pass
+
+        # Fallback: comma-separated list
+        parts = [p.strip().lower() for p in s.split(",") if p.strip()]
+        return parts or default_materials
+
+    return default_materials
 
 
-def split_sentences(text: str) -> List[str]:
-    if not text:
-        return []
-    return re.split(r"[.!?]\s+", text)
+def normalize_region(raw: Optional[Any]) -> Optional[str]:
+    """
+    Convert things like 'null' / '' into proper None.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        if s.lower() in {"null", "none", "global", "world", "worldwide"}:
+            return None
+        return s
+    return str(raw)
 
 
-def count_occurrences(text: str, terms: List[str]) -> int:
-    if not text:
-        return 0
-    text_lower = text.lower()
-    count = 0
-    for term in terms:
-        pattern = r"\b" + re.escape(term.lower()) + r"\b"
-        hits = len(re.findall(pattern, text_lower))
-        count += hits
-    return count
+# Risk scoring keyword lists
+RISK_KEYWORDS = [
+    "shortage",
+    "shortages",
+    "disruption",
+    "disruptions",
+    "strike",
+    "strikes",
+    "shutdown",
+    "shutdowns",
+    "closure",
+    "closures",
+    "fire",
+    "explosion",
+    "flood",
+    "earthquake",
+    "hurricane",
+    "typhoon",
+    "sanction",
+    "sanctions",
+    "ban",
+    "export ban",
+    "blockade",
+    "delay",
+    "delays",
+    "bottleneck",
+    "congestion",
+]
+CONSTRUCTION_KEYWORDS = [
+    "construction",
+    "infrastructure",
+    "project",
+    "projects",
+    "site",
+    "bridge",
+    "tunnel",
+    "road",
+    "highway",
+    "building",
+    "plant",
+    "factory",
+]
 
 
-def compute_risk_features(
-    title: str,
-    body: str,
-    material_terms: List[str],
-) -> Dict[str, Any]:
-    title = title or ""
-    body = body or ""
-    full_text = f"{title}\n{body}"
-    text_lower = full_text.lower()
+def compute_risk_features(text: str, title: str, materials: List[str]) -> dict:
+    text_l = (text or "").lower()
+    title_l = (title or "").lower()
 
-    # treat "concrete" carefully: if no construction context nearby, it's often metaphorical
-    material_terms_effective = []
-    for m in material_terms:
-        if m == "concrete":
-            if any(ck in text_lower for ck in CONSTRUCTION_KEYWORDS):
-                material_terms_effective.append(m)
-        else:
-            material_terms_effective.append(m)
+    material_hits = 0
+    for m in materials:
+        if not m:
+            continue
+        pattern = re.escape(m.lower())
+        material_hits += len(re.findall(pattern, text_l))
 
-    material_hits = count_occurrences(text_lower, material_terms_effective)
-    risk_keyword_hits = count_occurrences(text_lower, RISK_KEYWORDS)
-    construction_hits = count_occurrences(text_lower, CONSTRUCTION_KEYWORDS)
+    risk_hits = 0
+    for k in RISK_KEYWORDS:
+        pattern = r"\b" + re.escape(k.lower()) + r"\b"
+        risk_hits += len(re.findall(pattern, text_l))
 
-    sentences = split_sentences(full_text)
+    constr_hits = 0
+    for k in CONSTRUCTION_KEYWORDS:
+        pattern = r"\b" + re.escape(k.lower()) + r"\b"
+        constr_hits += len(re.findall(pattern, text_l))
+
+    sentences = re.split(r"[.!?]\s+", text_l)
     joint_sentences = 0
     for s in sentences:
-        s_lower = s.lower()
-        if any(m in s_lower for m in material_terms_effective) and any(
-            rk in s_lower for rk in RISK_KEYWORDS
-        ):
+        if not s:
+            continue
+        if any(m in s for m in materials) and any(k in s for k in RISK_KEYWORDS):
             joint_sentences += 1
 
-    title_lower = title.lower()
-    title_has_material = any(m in title_lower for m in material_terms_effective)
-    title_has_risk = any(rk in title_lower for rk in RISK_KEYWORDS)
-    title_joint = bool(title_has_material and title_has_risk)
+    title_joint = any(m in title_l for m in materials) and any(
+        k in title_l for k in RISK_KEYWORDS
+    )
 
     risk_score = (
-        3 * int(title_joint)
-        + 2 * min(joint_sentences, 3)
-        + 1 * min(material_hits, 5)
-        + 1 * min(risk_keyword_hits, 5)
-        + 1 * min(construction_hits, 3)
+        material_hits
+        + 2 * risk_hits
+        + constr_hits
+        + 2 * joint_sentences
+        + (2 if title_joint else 0)
     )
+    # Clamp to a simple 0–10 scale
+    risk_score = max(0, min(int(risk_score), 10))
 
     return {
         "material_hits": material_hits,
-        "risk_keyword_hits": risk_keyword_hits,
-        "construction_hits": construction_hits,
+        "risk_keyword_hits": risk_hits,
+        "construction_hits": constr_hits,
         "joint_sentences": joint_sentences,
         "title_joint": title_joint,
         "risk_score": risk_score,
     }
 
 
-async def call_openai_chat(prompt: str) -> Dict[str, Any]:
-    if not OPENAI_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="OPENAI_API_KEY is not set; classification endpoint is not configured.",
-        )
-
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are an assistant that classifies news articles about supply "
-                    "chain risks for construction materials."
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "temperature": 0.1,
-    }
-
-    async with httpx.AsyncClient(timeout=40.0) as client:
-        resp = await client.post(
-            f"{OPENAI_API_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            json=payload,
-        )
-
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=502,
-            detail=f"OpenAI API error: {resp.status_code} {resp.text}",
-        )
-
-    data = resp.json()
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError):
-        raise HTTPException(
-            status_code=502,
-            detail="Unexpected response format from OpenAI.",
-        )
-
-    # Expect content to be a JSON object; if not, try to extract JSON part
-    content = content.strip()
-    try:
-        if content.startswith("```"):
-            # handle ```json ... ```
-            content = re.sub(r"^```[a-zA-Z]*", "", content)
-            content = re.sub(r"```$", "", content).strip()
-        return json.loads(content)
-    except json.JSONDecodeError:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not parse JSON from OpenAI response: {content}",
-        )
-
-
-def build_classification_prompt(
-    doc: ArticleForClassification,
-    materials: List[str],
-    region: Optional[str],
-) -> str:
-    materials_str = ", ".join(materials) if materials else "cement, concrete, rebar, steel and other construction materials"
-    region_str = region or "any region relevant to the article"
-
-    return (
-        "You are classifying whether this news article describes an EXTERNAL RISK that "
-        "could affect the SUPPLY or DELIVERY of construction materials.\n\n"
-        f"Materials of interest: {materials_str}\n"
-        f"Region of interest: {region_str}\n\n"
-        "For the given article, answer with a single JSON object with this schema:\n"
-        "{\n"
-        '  "is_risk": true/false,\n'
-        '  "risk_level": integer 1-5, 1 = very low, 5 = very high,\n'
-        '  "affected_materials": [list of material names],\n'
-        '  "affected_regions": [list of regions/countries/ports],\n'
-        '  "time_horizon_days": integer or null,\n'
-        '  "reason": "short explanation"\n'
-        "}\n\n"
-        "Classify as is_risk = true ONLY if the article clearly describes a disruption, shortage, "
-        "shutdown, strike, port congestion, export ban, price spike, accident or similar event "
-        "that could realistically impact supply or delivery of the materials.\n\n"
-        "Article title:\n"
-        f"{doc.title}\n\n"
-        "Article content (may be truncated):\n"
-        f"{(doc.content or '')[:2000]}\n"
-    )
-
-
 # ---------------------------
 # Routes
 # ---------------------------
+
 
 @app.get("/health")
 async def health():
@@ -396,9 +292,12 @@ async def news_search(payload: NewsQuery):
     today = date.today()
     date_start = today - timedelta(days=effective_days_back)
 
+    # --------------------------------------------------
     # Build keyword(s) for NewsAPI.ai
+    # --------------------------------------------------
     raw_q = (payload.query or "").strip()
-    keywords: List[str] | str
+
+    keywords: Any
     keyword_oper = "or"
 
     or_split = re.split(r"\bOR\b", raw_q, flags=re.IGNORECASE)
@@ -409,8 +308,6 @@ async def news_search(payload: NewsQuery):
         keyword_oper = "or"
     else:
         keywords = raw_q
-
-    materials = normalize_materials(payload.materials)
 
     body = {
         "apiKey": NEWSAPI_KEY,
@@ -429,8 +326,8 @@ async def news_search(payload: NewsQuery):
 
     # Call NewsAPI.ai
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(
+        async with httpx.AsyncClient(timeout=20.0) as client_http:
+            resp = await client_http.post(
                 NEWSAPI_AI_ENDPOINT,
                 json=body,
                 headers={"Content-Type": "application/json"},
@@ -448,6 +345,7 @@ async def news_search(payload: NewsQuery):
         )
 
     data = resp.json()
+
     if "error" in data:
         raise HTTPException(
             status_code=502,
@@ -461,11 +359,7 @@ async def news_search(payload: NewsQuery):
     print("Raw top-level keys:", list(data.keys()), flush=True)
 
     articles_block = data.get("articles", {})
-    print("articles_block type:", type(articles_block), flush=True)
-    results_preview = [
-        a.get("title") for a in articles_block.get("results", [])[:5]
-    ]
-    print("First article titles:", results_preview, flush=True)
+    print("articles_block_type:", type(articles_block), flush=True)
     print("totalResults:", articles_block.get("totalResults"), flush=True)
     print("======================================================", flush=True)
 
@@ -473,16 +367,21 @@ async def news_search(payload: NewsQuery):
     articles = articles_block.get("results", []) or []
     total_raw = articles_block.get("totalResults", len(articles))
 
-    documents: List[Dict[str, Any]] = []
+    materials = normalize_materials(payload.materials)
     risk_hint = build_material_risk_hint(payload, effective_days_back)
 
+    documents = []
     for a in articles:
-        title = a.get("title") or ""
-        content = a.get("body") or ""
         source = a.get("source", {})
         source_title = source.get("title") if isinstance(source, dict) else source
 
-        risk_features = compute_risk_features(title, content, materials)
+        title = a.get("title") or ""
+        content = a.get("body") or ""
+        features = compute_risk_features(
+            text=f"{title}\n{content}",
+            title=title,
+            materials=materials,
+        )
 
         doc = {
             "id": a.get("uri") or a.get("url"),
@@ -494,91 +393,149 @@ async def news_search(payload: NewsQuery):
                 a.get("dateTimePub") or a.get("dateTime") or a.get("date")
             ),
             "material_risk_hint": risk_hint,
-            "material_hits": risk_features["material_hits"],
-            "risk_keyword_hits": risk_features["risk_keyword_hits"],
-            "construction_hits": risk_features["construction_hits"],
-            "joint_sentences": risk_features["joint_sentences"],
-            "title_joint": risk_features["title_joint"],
-            "risk_score": risk_features["risk_score"],
+            "material_hits": features["material_hits"],
+            "risk_keyword_hits": features["risk_keyword_hits"],
+            "construction_hits": features["construction_hits"],
+            "joint_sentences": features["joint_sentences"],
+            "title_joint": features["title_joint"],
+            "risk_score": features["risk_score"],
         }
         documents.append(doc)
 
-    matched_before_filter = len(documents)
+    matched_docs_before_filter = len(documents)
+    docs_filtered = documents
 
-    # Simple heuristic filter (still recall-first; classification does the heavy lifting)
+    min_score_used: Optional[int] = None
+
     if payload.risk_filter:
-        min_score = payload.min_risk_score if payload.min_risk_score is not None else 2
-        filtered_docs: List[Dict[str, Any]] = []
-        for d in documents:
-            if (
-                d["material_hits"] == 0
-                or d["risk_keyword_hits"] == 0
-                or d["risk_score"] < min_score
-            ):
-                continue
-            filtered_docs.append(d)
-        documents = filtered_docs
+        min_score_used = (
+            payload.min_risk_score
+            if payload.min_risk_score is not None
+            else 3
+        )
+        docs_filtered = [
+            d for d in documents if d["risk_score"] >= min_score_used
+        ]
 
-    documents.sort(key=lambda d: d["risk_score"], reverse=True)
-    documents = documents[: payload.max_docs]
+    # Rank by risk_score and cap the number of docs returned
+    docs_filtered.sort(key=lambda d: d["risk_score"], reverse=True)
+    docs_filtered = docs_filtered[: payload.max_docs]
 
     return {
         "status": "ok",
         "effective_days_back": effective_days_back,
         "total_results_raw": int(total_raw),
-        "matched_docs_before_filter": matched_before_filter,
-        "returned_docs": len(documents),
+        "matched_docs_before_filter": matched_docs_before_filter,
+        "returned_docs": len(docs_filtered),
         "risk_filter": payload.risk_filter,
-        "min_risk_score": payload.min_risk_score,
-        "documents": documents,
+        "min_risk_score": min_score_used,
+        "documents": docs_filtered,
     }
 
 
 @app.post("/news/classify")
 async def news_classify(payload: ClassificationRequest):
     """
-    Takes a batch of documents (e.g. from /news/search) and uses an LLM
-    to classify which ones are true external supply risks.
+    Classify a set of articles as external risks or not, using OpenAI.
     """
-    materials = normalize_materials(payload.materials)
-    region = payload.region
+    if not payload.documents:
+        return {
+            "status": "ok",
+            "total_docs": 0,
+            "risk_docs": 0,
+            "classified": [],
+            "risks_only": [],
+        }
 
-    classified_results: List[ClassifiedArticle] = []
+    materials_str = ", ".join(payload.materials or [])
+    region_str = payload.region or "Global"
 
-    for doc in payload.documents:
-        prompt = build_classification_prompt(doc, materials, region)
-        result = await call_openai_chat(prompt)
-
-        classified = ClassifiedArticle(
-            id=doc.id,
-            title=doc.title,
-            url=doc.url,
-            source=doc.source,
-            publishedAt=doc.publishedAt,
-            material_risk_hint=doc.material_risk_hint,
-            is_risk=bool(result.get("is_risk", False)),
-            risk_level=int(result.get("risk_level", 1)),
-            affected_materials=[str(m) for m in result.get("affected_materials", [])],
-            affected_regions=[str(r) for r in result.get("affected_regions", [])],
-            time_horizon_days=(
-                int(result["time_horizon_days"])
-                if result.get("time_horizon_days") is not None
-                else None
-            ),
-            reason=str(result.get("reason", "")),
+    articles_parts = []
+    for idx, doc in enumerate(payload.documents, start=1):
+        articles_parts.append(
+            f"Article {idx}:\n"
+            f"id: {doc.id}\n"
+            f"title: {doc.title}\n"
+            f"content: {doc.content or ''}\n"
+            f"source: {doc.source or ''}\n"
+            f"publishedAt: {doc.publishedAt or ''}\n"
+            f"material_risk_hint: {doc.material_risk_hint or ''}\n"
         )
-        classified_results.append(classified)
+    articles_block = "\n\n".join(articles_parts)
 
-    # Optionally filter to only risk == true
-    risks_only = [c for c in classified_results if c.is_risk]
+    system_prompt = (
+        "You are a supply chain risk classifier for construction materials. "
+        "You decide whether each news article describes a REAL external event "
+        "that could disrupt the supply, availability, or delivery of the materials."
+    )
+
+    user_prompt = f"""
+Materials of interest: {materials_str or "various construction materials"}
+Region of interest: {region_str}
+
+Only mark is_risk=true if:
+- there is an actual external event (plant fire, strike, port closure, sanctions, export ban,
+  extreme weather, major regulatory change, shipping disruption, etc.), AND
+- it plausibly affects supply or delivery timelines of construction materials.
+
+If the article is only about price forecasts, generic market commentary, company earnings,
+or unrelated politics, set is_risk=false.
+
+Return a JSON object with a single key "classified" whose value is a list of objects,
+one per article in the SAME ORDER. Each object MUST have:
+
+- id (string or null)
+- title (string)
+- url (string or null)
+- source (string or null)
+- publishedAt (string or null)
+- material_risk_hint (string or null)
+- is_risk (boolean)
+- risk_level (integer 1-5; 1 = very low, 5 = very high)
+- affected_materials (list of strings)
+- affected_regions (list of strings)
+- time_horizon_days (integer or null)
+- reason (short explanation)
+
+Articles:
+{articles_block}
+"""
+
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"OpenAI API error: {exc}",
+        ) from exc
+
+    raw_content = completion.choices[0].message.content
+    try:
+        parsed = json.loads(raw_content)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to parse OpenAI JSON: {exc}; raw={raw_content}",
+        ) from exc
+
+    classified = parsed.get("classified", [])
+    risk_only = [c for c in classified if c.get("is_risk")]
 
     return {
         "status": "ok",
-        "total_docs": len(classified_results),
-        "risk_docs": len(risks_only),
-        "classified": [c.dict() for c in classified_results],
-        "risks_only": [c.dict() for c in risks_only],
+        "total_docs": len(payload.documents),
+        "risk_docs": len(risk_only),
+        "classified": classified,
+        "risks_only": risk_only,
     }
+
 
 @app.post("/news/risk")
 async def news_risk(payload: RiskRequest):
@@ -588,49 +545,62 @@ async def news_risk(payload: RiskRequest):
     - fetches candidate articles from NewsAPI.ai
     - runs LLM classification
     - returns only external risk events
-
-    This is the endpoint your agent should usually call.
     """
 
-    # 1) Decide query string
-    # If user provided a query, use it; otherwise build "mat1 OR mat2 ..."
+    # Normalize inputs (tolerate WatsonX sending strings)
     materials = normalize_materials(payload.materials)
+    region = normalize_region(payload.region)
+
+    days_back: int = payload.days_back
+    if isinstance(days_back, str):
+        try:
+            days_back = int(days_back)
+        except ValueError:
+            days_back = 7
+    days_back = max(1, min(days_back, 30))
+
+    max_docs: int = payload.max_docs
+    if isinstance(max_docs, str):
+        try:
+            max_docs = int(max_docs)
+        except ValueError:
+            max_docs = 10
+    max_docs = max(1, min(max_docs, 50))
+
+    # Decide query string
     if payload.query:
         query_str = payload.query
     else:
-        # Simple OR query over materials, e.g. "cement OR concrete OR rebar ..."
         query_str = " OR ".join(materials)
 
-    # 2) Call the internal /news/search logic with risk_filter disabled
+    # Call internal news_search (risk_filter disabled here)
     news_query = NewsQuery(
         query=query_str,
-        region=payload.region,
+        region=region,
         materials=materials,
-        days_back=payload.days_back,
-        risk_filter=False,          # keep broad recall; LLM will filter
-        max_docs=payload.max_docs,
+        days_back=days_back,
+        risk_filter=False,      # keep broad recall; LLM will filter
+        max_docs=max_docs,
         min_risk_score=None,
     )
 
     search_result = await news_search(news_query)
+    candidate_docs = search_result["documents"]
 
-    candidate_docs = search_result.get("documents", []) or []
-
-    # If no candidates, short-circuit
     if not candidate_docs:
         return {
             "status": "ok",
-            "effective_days_back": search_result.get("effective_days_back"),
-            "total_results_raw": search_result.get("total_results_raw"),
+            "effective_days_back": search_result["effective_days_back"],
+            "total_results_raw": search_result["total_results_raw"],
             "candidate_docs": 0,
             "risk_docs": 0,
             "risks": [],
         }
 
-    # 3) Build ClassificationRequest from search docs
-    classification_docs: List[ArticleForClassification] = []
+    # Build classification request
+    class_docs = []
     for d in candidate_docs:
-        classification_docs.append(
+        class_docs.append(
             ArticleForClassification(
                 id=d.get("id"),
                 title=d.get("title") or "",
@@ -642,19 +612,19 @@ async def news_risk(payload: RiskRequest):
             )
         )
 
-    classification_request = ClassificationRequest(
+    class_req = ClassificationRequest(
         materials=materials,
-        region=payload.region,
-        documents=classification_docs,
+        region=region,
+        documents=class_docs,
     )
 
-    classification_result = await news_classify(classification_request)
+    class_result = await news_classify(class_req)
 
     return {
         "status": "ok",
-        "effective_days_back": search_result.get("effective_days_back"),
-        "total_results_raw": search_result.get("total_results_raw"),
-        "candidate_docs": search_result.get("returned_docs"),
-        "risk_docs": classification_result.get("risk_docs"),
-        "risks": classification_result.get("risks_only"),
+        "effective_days_back": search_result["effective_days_back"],
+        "total_results_raw": search_result["total_results_raw"],
+        "candidate_docs": len(candidate_docs),
+        "risk_docs": class_result["risk_docs"],
+        "risks": class_result["risks_only"],
     }

@@ -2,8 +2,8 @@
   "openapi": "3.0.1",
   "info": {
     "title": "Procurement News Backend",
-    "version": "0.1.0",
-    "description": "Backend service that calls NewsAPI.ai (Event Registry) and returns normalized news documents for supply-chain risk monitoring."
+    "version": "0.2.0",
+    "description": "Backend service that calls NewsAPI.ai (Event Registry) for news ingestion and uses an LLM for supply-chain risk classification."
   },
   "servers": [
     {
@@ -40,17 +40,32 @@
                     },
                     "effective_days_back": {
                       "type": "integer",
-                      "example": 30
+                      "example": 30,
+                      "description": "Actual days_back value used (capped to 30)."
                     },
                     "total_results_raw": {
                       "type": "integer",
                       "example": 7042,
                       "description": "Total raw results reported by NewsAPI.ai for this query."
                     },
+                    "matched_docs_before_filter": {
+                      "type": "integer",
+                      "example": 120,
+                      "description": "Number of articles parsed from the API response before applying heuristic risk_filter."
+                    },
                     "returned_docs": {
                       "type": "integer",
                       "example": 25,
                       "description": "Number of documents actually returned after filtering and ranking."
+                    },
+                    "risk_filter": {
+                      "type": "boolean",
+                      "description": "Whether heuristic risk filtering was applied for this response."
+                    },
+                    "min_risk_score": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "Minimum heuristic risk_score threshold used when risk_filter=true (if any)."
                     },
                     "documents": {
                       "type": "array",
@@ -75,6 +90,18 @@
                             "type": "integer",
                             "description": "Heuristic count of risk-related keyword matches in title+content."
                           },
+                          "construction_hits": {
+                            "type": "integer",
+                            "description": "Heuristic count of construction-context keywords."
+                          },
+                          "joint_sentences": {
+                            "type": "integer",
+                            "description": "Number of sentences that mention both a material and a risk keyword."
+                          },
+                          "title_joint": {
+                            "type": "boolean",
+                            "description": "True if the title contains both a material and a risk keyword."
+                          },
                           "risk_score": {
                             "type": "integer",
                             "description": "Combined heuristic risk score used for ranking."
@@ -85,6 +112,147 @@
                     }
                   },
                   "required": ["status", "documents"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/news/classify": {
+      "post": {
+        "summary": "News Classify",
+        "operationId": "news_classify_news_classify_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClassificationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "total_docs": {
+                      "type": "integer",
+                      "example": 10,
+                      "description": "Number of documents that were classified."
+                    },
+                    "risk_docs": {
+                      "type": "integer",
+                      "example": 3,
+                      "description": "Number of documents flagged as external risks (is_risk=true)."
+                    },
+                    "classified": {
+                      "type": "array",
+                      "description": "Full list of classified documents (risks and non-risks).",
+                      "items": {
+                        "$ref": "#/components/schemas/ClassifiedArticle"
+                      }
+                    },
+                    "risks_only": {
+                      "type": "array",
+                      "description": "Subset of classified articles where is_risk=true.",
+                      "items": {
+                        "$ref": "#/components/schemas/ClassifiedArticle"
+                      }
+                    }
+                  },
+                  "required": ["status", "total_docs", "risk_docs", "classified", "risks_only"]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/news/risk": {
+      "post": {
+        "summary": "News Risk (Search + Classify)",
+        "operationId": "news_risk_news_risk_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RiskRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "effective_days_back": {
+                      "type": "integer",
+                      "example": 14,
+                      "description": "Actual days_back used when querying NewsAPI.ai."
+                    },
+                    "total_results_raw": {
+                      "type": "integer",
+                      "example": 121307,
+                      "description": "Total raw results reported by NewsAPI.ai for the underlying query."
+                    },
+                    "candidate_docs": {
+                      "type": "integer",
+                      "example": 15,
+                      "description": "Number of candidate documents taken from /news/search before classification."
+                    },
+                    "risk_docs": {
+                      "type": "integer",
+                      "example": 2,
+                      "description": "Number of articles classified as external risks."
+                    },
+                    "risks": {
+                      "type": "array",
+                      "description": "List of external risk events (classified articles with is_risk=true).",
+                      "items": {
+                        "$ref": "#/components/schemas/ClassifiedArticle"
+                      }
+                    }
+                  },
+                  "required": ["status", "candidate_docs", "risk_docs", "risks"]
                 }
               }
             }
@@ -113,17 +281,17 @@
           "query": {
             "type": "string",
             "title": "Query",
-            "description": "Main risk phrase, e.g. 'concrete disruption'"
+            "description": "Main risk phrase, e.g. 'concrete disruption' or 'steel shortage'. Supports 'A OR B OR C' which the backend splits into multiple keywords."
           },
           "region": {
             "title": "Region",
-            "description": "City / region / country to focus on, e.g. 'Montreal'",
+            "description": "City / region / country to focus on, e.g. 'Montreal', 'United States', 'Mexico'.",
             "type": "string",
             "nullable": true
           },
           "materials": {
             "title": "Materials",
-            "description": "List of material keywords, e.g. ['concrete','cement']",
+            "description": "List of material keywords, e.g. ['concrete','cement']. Used to compute heuristic risk scores.",
             "type": "array",
             "items": {
               "type": "string"
@@ -132,13 +300,13 @@
           },
           "days_back": {
             "title": "Days Back",
-            "description": "How many days back to search from today (capped to 30 in backend)",
+            "description": "How many days back to search from today (backend caps to 30).",
             "type": "integer",
             "default": 5
           },
           "risk_filter": {
             "title": "Risk Filter",
-            "description": "If true, only return articles that look like material-related risks (material term + risk keyword).",
+            "description": "If true, only return articles that look like material-related risks (material term + risk keyword, score >= min_risk_score).",
             "type": "boolean",
             "default": true
           },
@@ -146,7 +314,164 @@
             "title": "Max Docs",
             "description": "Maximum number of articles to return after filtering & ranking.",
             "type": "integer",
-            "default": 200
+            "default": 20
+          },
+          "min_risk_score": {
+            "title": "Min Risk Score",
+            "description": "Optional minimum heuristic risk_score threshold when risk_filter=true. If omitted, a default is used.",
+            "type": "integer",
+            "nullable": true
+          }
+        }
+      },
+      "ArticleForClassification": {
+        "title": "ArticleForClassification",
+        "type": "object",
+        "required": ["title"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string",
+            "nullable": true
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true
+          },
+          "source": {
+            "type": "string",
+            "nullable": true
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "material_risk_hint": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ClassificationRequest": {
+        "title": "ClassificationRequest",
+        "type": "object",
+        "required": ["documents"],
+        "properties": {
+          "materials": {
+            "type": "array",
+            "items": { "type": "string" },
+            "nullable": true,
+            "description": "Materials of interest; used to guide the LLM classification."
+          },
+          "region": {
+            "type": "string",
+            "nullable": true,
+            "description": "Region of interest; used to guide the LLM classification."
+          },
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArticleForClassification"
+            }
+          }
+        }
+      },
+      "ClassifiedArticle": {
+        "title": "ClassifiedArticle",
+        "type": "object",
+        "required": ["title", "is_risk", "risk_level", "affected_materials", "affected_regions", "reason"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "nullable": true
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true
+          },
+          "source": {
+            "type": "string",
+            "nullable": true
+          },
+          "publishedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "material_risk_hint": {
+            "type": "string",
+            "nullable": true
+          },
+          "is_risk": {
+            "type": "boolean",
+            "description": "True if the LLM determined this article describes an external supply/delivery risk."
+          },
+          "risk_level": {
+            "type": "integer",
+            "description": "Discrete risk level 1-5 (1=very low, 5=very high)."
+          },
+          "affected_materials": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of construction materials affected by the event."
+          },
+          "affected_regions": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "List of regions / countries / ports affected by the event."
+          },
+          "time_horizon_days": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Approximate time horizon in days over which the risk is relevant, if provided by the LLM."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Short natural-language explanation of why this article is (or is not) a supply risk."
+          }
+        }
+      },
+      "RiskRequest": {
+        "title": "RiskRequest",
+        "type": "object",
+        "properties": {
+          "materials": {
+            "type": "array",
+            "items": { "type": "string" },
+            "nullable": true,
+            "description": "Materials of interest. If omitted, defaults to cement/concrete/rebar/steel/aggregates."
+          },
+          "region": {
+            "type": "string",
+            "nullable": true,
+            "description": "Region of interest (country / area), e.g. 'United States', 'Mexico', 'EU'."
+          },
+          "days_back": {
+            "type": "integer",
+            "default": 7,
+            "description": "How many days back to search from today (backend caps to 30)."
+          },
+          "max_docs": {
+            "type": "integer",
+            "default": 10,
+            "description": "Max candidate docs fetched from NewsAPI before classification."
+          },
+          "query": {
+            "type": "string",
+            "nullable": true,
+            "description": "Optional override for raw keyword query. If omitted, backend builds 'mat1 OR mat2 ...' from materials."
           }
         }
       },
