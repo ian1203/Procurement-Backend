@@ -92,26 +92,18 @@ async def health():
 
 @app.post("/news/search")
 async def news_search(payload: NewsQuery):
-    # NewsAPI.ai free / normal plans are typically limited to the last 30 days,
-    # so we cap there to avoid confusing “older than 30 days” failures.
     effective_days_back = min(payload.days_back, 30)
 
     today = date.today()
     date_start = today - timedelta(days=effective_days_back)
 
-    # Build keyword list: main risk phrase + materials
-    keywords: List[str] = [payload.query]
-    if payload.materials:
-        keywords.extend(m for m in payload.materials if m)
+    # Treat query as a single keyword string (it can contain boolean logic itself)
+    keyword_value: str = payload.query
 
-    # If there is more than one keyword we use AND; otherwise it doesn't matter
-    keyword_oper = "and" if len(keywords) > 1 else "or"
-
-    # Build request body for NewsAPI.ai / Event Registry
     body = {
         "apiKey": NEWSAPI_KEY,
-        "keyword": keywords if len(keywords) > 1 else keywords[0],
-        "keywordOper": keyword_oper,
+        "keyword": keyword_value,        # single string, e.g. "oil OR energy"
+        "keywordOper": "or",            # ignored for single keyword, but ok
         "lang": ["eng"],
         "dateStart": date_start.strftime("%Y-%m-%d"),
         "dateEnd": today.strftime("%Y-%m-%d"),
@@ -123,7 +115,7 @@ async def news_search(payload: NewsQuery):
     if payload.region:
         body["sourceLocationUri"] = region_to_location_uri(payload.region)
 
-    # Call NewsAPI.ai
+    # --------- 1) Call NewsAPI.ai ----------
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             resp = await client.post(
@@ -151,10 +143,7 @@ async def news_search(payload: NewsQuery):
             detail=f"NewsAPI.ai error: {data['error']}",
         )
 
-    # ======================================================
-    # 🔍 DEBUG BLOCK — Print exactly what we sent and got
-    # These prints appear in Render → Logs
-    # ======================================================
+    # --------- 2) DEBUG BLOCK (now resp & data exist) ----------
     print("=== NewsAPI.ai DEBUG ===", flush=True)
     print("Request body:", body, flush=True)
     print("HTTP status:", resp.status_code, flush=True)
@@ -167,12 +156,11 @@ async def news_search(payload: NewsQuery):
         a.get("title") for a in articles_block.get("results", [])[:5]
     ]
     print("First article titles:", results_preview, flush=True)
-
     print("totalResults:", articles_block.get("totalResults"), flush=True)
     print("======================================================", flush=True)
-    # ======================================================
+    # -----------------------------------------------------------
 
-    # Parse article block
+    # 3) Parse article block
     articles = articles_block.get("results", []) or []
     total_raw = articles_block.get("totalResults", len(articles))
 
